@@ -57,8 +57,8 @@ struct RGB_color{
 enum pformat{
         RGB,
         RGBA,
-        RGB16F,
-        RGBA16F
+        RGB32F,
+        RGBA32F
     };
 
 std::ostream& operator<<(std::ostream &strm, const RGB_color &a) {
@@ -71,8 +71,8 @@ public:
         switch(pixel_format){
             case RGB: stride = 3; break;
             case RGBA: stride = 4; break;
-            case RGB16F: stride = 6; break;
-            case RGBA16F: stride = 8; break;
+            case RGB32F: stride = 12; break;
+            case RGBA32F: stride = 16; break;
         }
         load_image();
     }
@@ -84,9 +84,22 @@ public:
             std::stringstream str;
             str << "P3\n" << width << ' ' << height << "\n256\n";
             for(int i = 0; i< height;i++){
-                for(int j = 0; j < width*4; j+=4){
-                    write_color(str, RGB_color(pixel_map[i*width*4+j],pixel_map[i*width*4+j+1],pixel_map[i*width*4+j+2]));
+                for(int j = 0; j < width*stride; j+=stride){
+                    if(pixel_format == RGB || pixel_format == RGBA){
+                        write_color(str, RGB_color(pixel_map[i*width*stride+j],pixel_map[i*width*stride+j+1],pixel_map[i*width*stride+j+2]));
+                    }
+                    else if(pixel_format == RGB32F || pixel_format == RGBA32F){
+                        float rf, gf, bf;
+                        std::copy(&(pixel_map[i*width*stride+j]),&(pixel_map[i*width*stride+j+4]), reinterpret_cast<char*>(&rf));
+                        std::copy(&(pixel_map[i*width*stride+j+4]),&(pixel_map[i*width*stride+j+8]), reinterpret_cast<char*>(&gf));
+                        std::copy(&(pixel_map[i*width*stride+j+8]),&(pixel_map[i*width*stride+j+12]), reinterpret_cast<char*>(&bf));
+                        uint8_t r = lerp(0, 255, rf);
+                        uint8_t g = lerp(0, 255, gf);
+                        uint8_t b = lerp(0, 255, bf);
+                        write_color(str, RGB_color(r,g,b));
+                    }
                     //std::clog<< i*width*4+j << "\n";
+
                 }
             }
             out << str.str();
@@ -117,8 +130,8 @@ public:
     void reverse_rows() {
         uint8_t* reversed = (uint8_t*)malloc(pixel_map_size*sizeof(uint8_t));
         for(int i = abs(height)-1; i>=0; i--){
-            int reversed_index = (abs(height) - 1 - i) * width*4;
-            std::copy(pixel_map + i*width*4,pixel_map + i*width*4 + width*4, reversed + reversed_index);
+            int reversed_index = (abs(height) - 1 - i) * width*stride;
+            std::copy(pixel_map + i*width*stride,pixel_map + i*width*stride + width*stride, reversed + reversed_index);
         }
         free(pixel_map);
         pixel_map = reversed;
@@ -153,6 +166,8 @@ private:
 
     pformat pixel_format = RGBA;
     int stride = 4;
+
+   int insert_count = 0;
 
     void write_color(std::ostream &out, RGB_color pixel_color){
         out << static_cast<int>(pixel_color.r) << ' '
@@ -205,13 +220,14 @@ private:
             std::clog << "Unsupported bitmap\n";
             loaded = false;
         }
+        std::clog << insert_count << '\n';
         free(buffer);
     }
 
     bool load_BITMAPINFOHEADER(char* buffer){
         get_header_data(buffer);
         calculated_image_data_size = file_size - image_data_offset;
-        pixel_map_size = width*height*4;
+        pixel_map_size = width*height*stride;
         std::clog << "Size: " << pixel_map_size * sizeof(uint8_t)<< '\n';
         pixel_map = (uint8_t*)malloc(pixel_map_size * sizeof(uint8_t));
         if(!pixel_map){
@@ -662,18 +678,61 @@ private:
     }
 
     void insert_pixel(RGB_color c){
-        if(pixel_map_position+3>pixel_map_size){
+
+        insert_count++;
+        if(pixel_map_position+stride>pixel_map_size){
             std::cerr << "Inserting into invalid position " << pixel_map_position << " When max: " << pixel_map_size << '\n';
         }
-        else{
+        else if(pixel_format == RGB){
+            pixel_map[pixel_map_position++] = c.r;
+            pixel_map[pixel_map_position++] = c.g;
+            pixel_map[pixel_map_position++] = c.b;
+        }
+        else if(pixel_format == RGBA){
             //std::cerr << "Inserting into: " << pixel_map_position<< '\n';
             pixel_map[pixel_map_position++] = c.r;
             pixel_map[pixel_map_position++] = c.g;
             pixel_map[pixel_map_position++] = c.b;
             pixel_map[pixel_map_position++] = c.a;
         }
+        else if(pixel_format == RGB32F){
+            float r = inv_lerp(0, 255, c.r);
+            float g = inv_lerp(0, 255, c.g);
+            float b = inv_lerp(0, 255, c.b);
+            std::copy(&r, &r + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            std::copy(&g, &g + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            std::copy(&b, &b + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            //std::clog << "Inserted color: " << r << ' ' << g << ' ' << b <<'\n';
+            //std::clog <<  "Actual color: "  << c <<'\n';
+        }
+        else if(pixel_format == RGBA32F){
+            float r = inv_lerp(0, 255, c.r);
+            float g = inv_lerp(0, 255, c.g);
+            float b = inv_lerp(0, 255, c.b);
+            float a = inv_lerp(0, 255, c.a);
+            std::copy(&r, &r + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            std::copy(&g, &g + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            std::copy(&b, &b + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+            std::copy(&a, &a + 1, reinterpret_cast<float*>(&(pixel_map[pixel_map_position])));
+            pixel_map_position += sizeof(float);
+        }
     }
 
 
+    float lerp(float a, float b, float f)
+    {
+        return a * (1.0 - f) + (b * f);
+    }
 
+    float inv_lerp(float a, float b, float v)
+    {
+        //std::clog <<  "Float: "  << (v-a) / (b-a) <<'\n';
+        return (v-a) / (b-a);
+    }
 };
