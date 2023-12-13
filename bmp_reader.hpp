@@ -11,9 +11,10 @@
 #include <math.h>
 #include <bitset>
 
-static constexpr int MINIMUM_BMP_SIZE = 512;
-static constexpr int IMAGE_DATA_OFFSET_OFFSET = 10;
 static constexpr int BITMAP_HEADER_SIZE = 14;
+
+//Offsets
+static constexpr int IMAGE_DATA_OFFSET_OFFSET = 10;
 static constexpr int DIB_HEADER_SIZE_OFFSET = 14;
 static constexpr int WIDTH_OFFSET = 18;
 static constexpr int HEIGHT_OFFSET = 22;
@@ -23,10 +24,16 @@ static constexpr int PIXARAY_SIZE_OFFSET = 34;
 static constexpr int COLOR_PALLETE_OFFSET = 46;
 static constexpr int HALFTONING_OFFSET = 60;
 
+//Headers
+static constexpr int DIB_BITMAPCOREHEADER = 12;
+static constexpr int DIB_OS22XBITMAPHEADER = 64;
 static constexpr int DIB_BITMAPINFOHEADER = 40;
+static constexpr int DIB_BITMAPV2HEADER = 52;
+static constexpr int DIB_BITMAPV3HEADER = 56;
+static constexpr int DIB_BITMAPV4HEADER = 108;
 static constexpr int DIB_BITMAPV5HEADER = 124;
 
-
+//Pixel Encoding
 static constexpr int BI_RGB = 0;
 static constexpr int BI_RLE8 = 1;
 static constexpr int BI_RLE4 = 2;
@@ -47,41 +54,82 @@ struct RGB_color{
     uint8_t r,g,b,a;
 };
 
+enum pformat{
+        RGB,
+        RGBA,
+        RGB16F,
+        RGBA16F
+    };
+
 std::ostream& operator<<(std::ostream &strm, const RGB_color &a) {
     return strm << "R: " << static_cast<int>(a.r) << " G: " << static_cast<int>(a.g) << " B: "<< static_cast<int>(a.b) <<'\n';
 }
 
 class bmp_reader{
 public:
-    bmp_reader(const std::string& _path) : path(_path) {
-        std::clog << path << '\n';
+    bmp_reader(const std::string& _path, pformat _pixel_format) : path(_path), pixel_format(_pixel_format) {
+        switch(pixel_format){
+            case RGB: stride = 3; break;
+            case RGBA: stride = 4; break;
+            case RGB16F: stride = 6; break;
+            case RGBA16F: stride = 8; break;
+        }
         load_image();
     }
+
+    bmp_reader(const std::string& _path) : bmp_reader(_path, pformat::RGBA) {}
 
     void output_to_ppm(std::ostream &out){
         if(loaded){
             std::stringstream str;
             str << "P3\n" << width << ' ' << height << "\n256\n";
             for(int i = 0; i< height;i++){
-                for(int j = 0; j < width; j++){
-                    write_color(str, pixel_map[i*width+j]);
+                for(int j = 0; j < width*4; j+=4){
+                    write_color(str, RGB_color(pixel_map[i*width*4+j],pixel_map[i*width*4+j+1],pixel_map[i*width*4+j+2]));
+                    //std::clog<< i*width*4+j << "\n";
                 }
             }
             out << str.str();
         }
         else{
-            std::clog << "Cannot output file since image failed to load\n";
+            std::clog << "Cannot output file since the image failed to load\n";
         }
 
     }
 
+    uint8_t* get_data(){
+        return pixel_map;
+    }
 
 
+    void free_data(){
+        free(pixel_map);
+    }
+
+    int get_width(){
+        return width;
+    }
+
+    int get_height(){
+        return height;
+    }
+
+    void reverse_rows() {
+        uint8_t* reversed = (uint8_t*)malloc(pixel_map_size*sizeof(uint8_t));
+        for(int i = abs(height)-1; i>=0; i--){
+            int reversed_index = (abs(height) - 1 - i) * width*4;
+            std::copy(pixel_map + i*width*4,pixel_map + i*width*4 + width*4, reversed + reversed_index);
+        }
+        free(pixel_map);
+        pixel_map = reversed;
+    }
 private:
     std::string path;
     int width, height;
     uint64_t file_size;
-    std::vector<RGB_color> pixel_map;
+    uint8_t* pixel_map;
+    uint64_t pixel_map_size;
+    uint64_t pixel_map_position;
     std::vector<RGB_color> color_table;
 
     uint32_t image_data_offset;
@@ -103,6 +151,9 @@ private:
     bool loaded = false;
     bool topdown = false;
 
+    pformat pixel_format = RGBA;
+    int stride = 4;
+
     void write_color(std::ostream &out, RGB_color pixel_color){
         out << static_cast<int>(pixel_color.r) << ' '
             << static_cast<int>(pixel_color.g) << ' '
@@ -122,6 +173,7 @@ private:
         img_file.seekg(0, std::ios::beg);
 
         char* buffer = (char*)malloc(file_size);
+
         img_file.read(buffer, file_size);
         img_file.close();
 
@@ -137,21 +189,40 @@ private:
         ){
             std::cerr << "Invalid File Signature: " << MB << '\n';
             free(buffer);
+            free(pixel_map);
             return;
         }
         std::copy(&(buffer[DIB_HEADER_SIZE_OFFSET]), &(buffer[DIB_HEADER_SIZE_OFFSET]) + sizeof(uint32_t), reinterpret_cast<char*>(&DIB_header_size));
         std::clog << "Header Size: " << DIB_header_size <<'\n';
 
-        loaded = load_BITMAPV5HEADER(buffer);
+        if(DIB_header_size == DIB_BITMAPINFOHEADER
+            || DIB_header_size == DIB_BITMAPV2HEADER
+            || DIB_header_size == DIB_BITMAPV3HEADER
+            || DIB_header_size == DIB_BITMAPV4HEADER
+            || DIB_header_size == DIB_BITMAPV4HEADER){
+            loaded = load_BITMAPINFOHEADER(buffer);
+        } else{
+            std::clog << "Unsupported bitmap\n";
+            loaded = false;
+        }
         free(buffer);
     }
 
-    bool load_BITMAPV5HEADER(char* buffer){
+    bool load_BITMAPINFOHEADER(char* buffer){
         get_header_data(buffer);
         calculated_image_data_size = file_size - image_data_offset;
+        pixel_map_size = width*height*4;
+        std::clog << "Size: " << pixel_map_size * sizeof(uint8_t)<< '\n';
+        pixel_map = (uint8_t*)malloc(pixel_map_size * sizeof(uint8_t));
+        if(!pixel_map){
+            std::cerr << "Allocation failed" << '\n';
+            return false;
+        }
+        pixel_map_position = 0;
         std::clog << "Calculated Image Data Size: " << calculated_image_data_size <<'\n';
         bool ret = true;
         if(abs(height) > 32727 || height == 0||width > 32727 || width <=0){
+            std::clog << "Invalid image dimensions" << '\n';
             ret = false;
         }
         else if(bits_per_pixel == 32){
@@ -184,7 +255,6 @@ private:
 
     bool read_32bit(char* buffer){
         get_bitfield_mask(buffer);
-        pixel_map.reserve(width+height);
         int row_size = static_cast<int>(ceil((bits_per_pixel * width)/32.0))  * 4;
         for(int i = 0; i < abs(height); i++){
             for(int j = 0; j < width*4 ; j+=4){
@@ -195,14 +265,13 @@ private:
                 uint8_t g = (ddword & g_mask) >> g_shift;
                 uint8_t r = (ddword & r_mask) >> r_shift;
                 uint8_t a = (ddword & (~(r_mask|b_mask|g_mask))) >> 24; //This doesn't work
-                pixel_map.push_back(RGB_color(r, g, b, a));
+                insert_pixel(RGB_color(r, g, b, a));
             }
         }
         return true;
     }
 
     bool read_24bit(char* buffer){
-        pixel_map.reserve(width+height);
         int row_size = static_cast<int>(ceil((bits_per_pixel * width)/32.0))  * 4;
         for(int i = 0; i < abs(height); i++){
             for(int j = 0; j < width*3 ; j+=3){
@@ -210,7 +279,7 @@ private:
                 uint8_t b = buffer[offset];
                 uint8_t g = buffer[offset + 1];
                 uint8_t r = buffer[offset + 2];
-                pixel_map.push_back(RGB_color(r, g, b));
+                insert_pixel(RGB_color(r, g, b));
             }
         }
         return true;
@@ -222,8 +291,6 @@ private:
         int b_shiftback = 8 - std::bitset<8>(b_mask>>b_shift).count();
         int g_shiftback = 8 - std::bitset<8>(g_mask>>g_shift).count();
         int r_shiftback = 8 - std::bitset<8>(r_mask>>r_shift).count();
-        std::clog << b_shiftback << ' ' << g_shiftback << ' ' << r_shiftback << '\n';
-        pixel_map.reserve(width+height);
 
         int row_size = static_cast<int>(ceil((bits_per_pixel * width)/32.0))  * 4;
         for(int i = 0; i < abs(height); i++){
@@ -234,7 +301,6 @@ private:
                 uint8_t b = ((word & b_mask) >> b_shift) << b_shiftback;
                 uint8_t g = ((word & g_mask) >> g_shift) << g_shiftback;
                 uint8_t r = ((word & r_mask) >> r_shift) << r_shiftback;
-                //std::clog << std::bitset<16>(word) << ' ' << std::bitset<8>(b) << ' ' << std::bitset<8>(g) << ' ' <<  std::bitset<8>(r) << '\n';
 
                 if((b == (((b_mask >> b_shift) << b_shiftback)) &&
                     (g == ((g_mask >> g_shift) << g_shiftback)) &&
@@ -246,7 +312,7 @@ private:
                     b = 255;
                     g = 255;
                 }
-                pixel_map.push_back(RGB_color(r, g, b));
+               insert_pixel(RGB_color(r, g, b));
             }
         }
         return true;
@@ -271,7 +337,7 @@ private:
             for(int j = 0; j < width ; j++){
                 int offset = image_data_offset + i*row_size + j;
                 uint8_t color_idx = buffer[offset];
-                pixel_map.push_back(RGB_color(color_table[color_idx]));
+                insert_pixel(RGB_color(color_table[color_idx]));
             }
         }
         return true;
@@ -299,11 +365,11 @@ private:
                 uint16_t value;
                 std::copy(&(buffer[offset]), &(buffer[offset]) + sizeof(uint16_t), reinterpret_cast<char*>(&value));
                 int color_idx = (value & 0xF0) >> 4;
-                pixel_map.push_back(RGB_color(color_table[color_idx]));
+                insert_pixel(RGB_color(color_table[color_idx]));
                 current_row_pixel_position++;
                 if(current_row_pixel_position < width){
                     color_idx = (value & 0x0F);
-                    pixel_map.push_back(RGB_color(color_table[color_idx]));
+                    insert_pixel(RGB_color(color_table[color_idx]));
                     current_row_pixel_position++;
                 }
             }
@@ -324,7 +390,7 @@ private:
                 for(int k = 0; k<8 && current_row_pixel_position < width; k++){
                     int color_idx = ((value & 0x80) >> 7);
                     value <<= 1;
-                    pixel_map.push_back(RGB_color(color_table[color_idx]));
+                    insert_pixel(RGB_color(color_table[color_idx]));
                     current_row_pixel_position++;
                 }
 
@@ -383,14 +449,14 @@ private:
                 case rle_state::ENCODED: {
                     RGB_color c = RGB_color(color_table[byte]);
                     for(int i = 0; i<number_of_pixels; i++){
-                        pixel_map.push_back(c);
+                        insert_pixel(c);
                     }
                     state = rle_state::INITIAL;
                     break;
                 }
                 case rle_state::ABSOLUTE: {
                     RGB_color c = RGB_color(color_table[byte]);
-                    pixel_map.push_back(c);
+                    insert_pixel(c);
                     number_of_pixels--;
                     if(number_of_pixels == 0){
                         if(total_pixels%2 != 0) {
@@ -456,10 +522,10 @@ private:
                     RGB_color c2 = RGB_color(color_table[lower_index]);
                     for(int i = 0; i<number_of_pixels; i++){
                         if(i%2 == 0){
-                            pixel_map.push_back(c1);
+                            insert_pixel(c1);
                         }
                         else{
-                            pixel_map.push_back(c2);
+                            insert_pixel(c2);
                         }
                     }
                     state = rle_state::INITIAL;
@@ -468,13 +534,13 @@ private:
                 case rle_state::ABSOLUTE: {
                     uint8_t upper_index = (byte & 0xf0) >> 4;
                     RGB_color c = RGB_color(color_table[upper_index]);
-                    pixel_map.push_back(c);
+                    insert_pixel(c);
                     number_of_pixels--;
 
                     if(number_of_pixels > 0){
                         uint8_t lower_index = byte & 0x0f;
                         c = RGB_color(color_table[lower_index]);
-                        pixel_map.push_back(c);
+                        insert_pixel(c);
                         number_of_pixels--;
                     }
                     if(number_of_pixels == 0){
@@ -496,15 +562,7 @@ private:
 
 
 
-    void reverse_rows() {
-        std::vector<RGB_color> reversed;
-        reversed.resize(height * width);
-        for(int i = abs(height)-1; i>=0; i--){
-            int reversed_index = (abs(height) - 1 - i) * width;
-            std::copy(pixel_map.begin()+i*width,pixel_map.begin()+i*width + width, reversed.begin() + reversed_index);
-        }
-        pixel_map = reversed;
-    }
+
 
     bool get_color_table_info(char* buffer){
         if(color_pallete_colors > 256){
@@ -603,6 +661,18 @@ private:
         std::clog << "Image data offset: " << image_data_offset<< '\n';
     }
 
+    void insert_pixel(RGB_color c){
+        if(pixel_map_position+3>pixel_map_size){
+            std::cerr << "Inserting into invalid position " << pixel_map_position << " When max: " << pixel_map_size << '\n';
+        }
+        else{
+            //std::cerr << "Inserting into: " << pixel_map_position<< '\n';
+            pixel_map[pixel_map_position++] = c.r;
+            pixel_map[pixel_map_position++] = c.g;
+            pixel_map[pixel_map_position++] = c.b;
+            pixel_map[pixel_map_position++] = c.a;
+        }
+    }
 
 
 
